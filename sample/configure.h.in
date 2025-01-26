@@ -1,0 +1,19 @@
+#ifndef CONFIGURE_H
+#define CONFIGURE_H
+
+#cmakedefine NET_INIT_AUTOMATIC
+#cmakedefine NET_INIT_DHCP
+#cmakedefine NET_INIT_STATIC
+
+#cmakedefine STATIC_IP "@STATIC_IP@"
+#cmakedefine STATIC_GATEWAY "@STATIC_GATEWAY@"
+#cmakedefine STATIC_NETMASK "@STATIC_NETMASK@"
+#cmakedefine STATIC_DNS_1 "@STATIC_DNS_1@"
+#cmakedefine STATIC_DNS_2 "@STATIC_DNS_2@"
+
+#cmakedefine FTP_SERVER_IP "@FTP_SERVER_IP@"
+#cmakedefine FTP_SERVER_PORT @FTP_SERVER_PORT@
+#cmakedefine FTP_USER "@FTP_USER@"
+#cmakedefine FTP_PASSWORD "@FTP_PASSWORD@"
+
+#endif  // CONFIGURE_H

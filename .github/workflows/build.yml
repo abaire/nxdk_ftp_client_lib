@@ -1,0 +1,110 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/**'
+      - '!.github/workflows/**'
+      - 'README.md'
+  pull_request:
+    paths-ignore:
+      - '.github/**'
+      - '!.github/workflows/**'
+      - 'README.md'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+jobs:
+  RunHostTestsLinux:
+    name: Run host tests - Linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone tree
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            llvm \
+            lld \
+            libsdl2-dev \
+            ninja-build
+
+      - name: Build tests
+        run: |
+          cmake -S . -B build
+          cmake --build build --verbose
+
+      - name: Run tests
+        run: |
+          ./build/tests/host/test_ftp_client
+
+  RunHostTestsMacOS:
+    name: Run host tests - macOS
+    runs-on: macos-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Clone tree
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export HOMEBREW_NO_INSTALL_CLEANUP=1
+          brew install \
+            cmake \
+            coreutils \
+            llvm@19 \
+            lld
+
+      - name: Build tests
+        run: |
+          cmake -S . -B build
+          cmake --build build --verbose
+
+      - name: Run tests
+        run: |
+          ./build/tests/host/test_ftp_client
+
+  BuildSampleISO:
+    name: Build sample xiso
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/xboxdev/nxdk:latest
+
+    steps:
+      - name: Clone tree
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apk --update --no-cache add \
+            cmake \
+            llvm \
+            lld \
+            sdl2-dev \
+            ninja-build
+
+      - name: Build ISO
+        run: |
+          eval $(/usr/src/nxdk/bin/activate -s)
+          export
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SAMPLE=ON \
+            -DCMAKE_TOOLCHAIN_FILE="${NXDK_DIR}/share/toolchain-nxdk.cmake"
+          cmake --build build --verbose
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ftp_client_sample_xiso.iso
+          path: build/sample/xiso/ftp_client_sample_xiso/ftp_client_sample_xiso.iso

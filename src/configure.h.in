@@ -1,0 +1,6 @@
+#ifndef CONFIGURE_H
+#define CONFIGURE_H
+
+#cmakedefine FORCE_FTP_PASV_IP_TO_CONTROL_IP
+
+#endif  // CONFIGURE_H
