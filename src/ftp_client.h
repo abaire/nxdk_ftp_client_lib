@@ -54,6 +54,8 @@ typedef enum FTPClientProcessStatus {
   FTP_CLIENT_PROCESS_STATUS_CLOSED = 2000,
   FTP_CLIENT_PROCESS_PASV_RESPONSE_INVALID = 2001,
   FTP_CLIENT_PROCESS_STATUS_CREATE_DATA_SOCKET_FAILED = 5000,
+  FTP_CLIENT_PROCESS_STATUS_CREATE_DATA_BUFFER_FAILED = 5001,
+  FTP_CLIENT_PROCESS_STATUS_CREATE_DATA_FILE_READ_FAILED = 5002,
   FTP_CLIENT_PROCESS_STATUS_DATA_SOCKET_CONNECT_FAILED = 6000,
   FTP_CLIENT_PROCESS_BUFFER_OVERFLOW = 8000,
 } FTPClientProcessStatus;
@@ -77,6 +79,11 @@ bool FTPClientCopyAndSendBuffer(FTPClient *context, const char *filename,
                                 void (*on_complete)(bool successful,
                                                     void *userdata),
                                 void *userdata);
+
+bool FTPClientSendFile(FTPClient *context, const char *local_filename,
+                       const char *remote_filename,
+                       void (*on_complete)(bool successful, void *userdata),
+                       void *userdata);
 
 #ifdef __cplusplus
 }  // extern "C"
