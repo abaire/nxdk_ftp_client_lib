@@ -523,7 +523,10 @@ static FTPClientProcessStatus PopulateSendBuffer(struct SendOperation *fs,
   fs->buffer_length = (ssize_t)bytes_read;
 
   if (!bytes_read) {
-    int error = ferror(fs->read_file);
+    int error = 0;
+    if (!feof(fs->read_file)) {
+      error = ferror(fs->read_file);
+    }
     fclose(fs->read_file);
     fs->read_file = NULL;
 
