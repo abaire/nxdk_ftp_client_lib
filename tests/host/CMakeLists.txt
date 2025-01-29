@@ -51,7 +51,7 @@ add_executable(
 )
 set_common_target_options(test_ftp_client)
 target_link_libraries(test_ftp_client
-        ftp_client
+        nxdk_ftp_client_lib::client
         NXDK::NXDK
         GTest::gmock_main
 )
