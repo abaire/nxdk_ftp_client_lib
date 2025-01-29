@@ -23,13 +23,15 @@ typedef enum FTPClientState {
   FTP_CLIENT_STATE_PASSWORD_REJECTED,
   FTP_CLIENT_STATE_PASSWORD_AWAIT_230,
   FTP_CLIENT_STATE_TYPE_BINARY_AWAIT_200,
-  FTP_CLIENT_STATE_PASV_AWAIT_227,
   FTP_CLIENT_STATE_FULLY_CONNECTED,
 } FTPClientState;
 
 //! Encapsulates information about a passive STOR operation.
 struct SendOperation {
   int socket;
+
+  char *filename;
+  struct sockaddr_in data_sockaddr;
 
   const void *buffer;
   ssize_t buffer_length;
@@ -47,7 +49,6 @@ struct SendOperation {
 
 struct FTPClient {
   struct sockaddr_in control_sockaddr;
-  struct sockaddr_in data_sockaddr;
 
   char *username;
   char *password;
@@ -86,6 +87,12 @@ static void FreeSendOperation(struct SendOperation *send_operation) {
 
   if (send_operation->buffer_owned) {
     free((void *)send_operation->buffer);
+    send_operation->buffer = NULL;
+  }
+
+  if (send_operation->filename) {
+    free(send_operation->filename);
+    send_operation->filename = NULL;
   }
   free(send_operation);
 }
@@ -124,13 +131,6 @@ FTPClientInitStatus FTPClientInit(FTPClient **context,
   client->control_sockaddr.sin_port = htons(port_host_ordered);
 #ifdef __APPLE__
   client->control_sockaddr.sin_len = sizeof(client->control_sockaddr);
-#endif
-
-  client->data_sockaddr.sin_family = AF_INET;
-  client->data_sockaddr.sin_addr.s_addr = 0xFFFFFFFF;
-  client->data_sockaddr.sin_port = 0;
-#ifdef __APPLE__
-  client->data_sockaddr.sin_len = sizeof(client->data_sockaddr);
 #endif
 
   if (username) {
@@ -265,6 +265,7 @@ bool FTPClientIsFullyConnected(FTPClient *context) {
   }                                          \
   context->send_buffer_len += (BYTES_WRITTEN);
 
+//! Handle response to welcome message.
 static FTPClientProcessStatus Handle220(FTPClient *context) {
   if (!context->username) {
     context->state = FTP_CLIENT_STATE_FULLY_CONNECTED;
@@ -280,6 +281,7 @@ static FTPClientProcessStatus Handle220(FTPClient *context) {
   return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
 }
 
+//! Handle response to USER.
 static FTPClientProcessStatus Handle331(FTPClient *context) {
   if (!context->password) {
     close(context->control_socket);
@@ -297,6 +299,7 @@ static FTPClientProcessStatus Handle331(FTPClient *context) {
   return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
 }
 
+//! Handle response to password accepted.
 static FTPClientProcessStatus Handle230(FTPClient *context) {
   context->state = FTP_CLIENT_STATE_TYPE_BINARY_AWAIT_200;
   RESERVE_SEND(send_buffer, send_buffer_size, 8)
@@ -306,16 +309,27 @@ static FTPClientProcessStatus Handle230(FTPClient *context) {
   return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
 }
 
+//! Handle response to `TYPE I`.
 static FTPClientProcessStatus Handle200(FTPClient *context) {
-  context->state = FTP_CLIENT_STATE_PASV_AWAIT_227;
-  RESERVE_SEND(send_buffer, send_buffer_size, 6)
-  int bytes_written = snprintf(send_buffer, send_buffer_size, "PASV\r\n");
-  VALIDATE_SEND(bytes_written)
-
+  context->state = FTP_CLIENT_STATE_FULLY_CONNECTED;
   return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
 }
 
+//! Handle PASV response.
 static FTPClientProcessStatus Handle227(FTPClient *context) {
+  struct SendOperation *send_op = NULL;
+  for (size_t i = 0; i < MAX_SEND_OPERATIONS; ++i) {
+    struct SendOperation *op = context->file_send_buffer[i];
+    if (op && op->socket < 0) {
+      send_op = op;
+      break;
+    }
+  }
+
+  if (!send_op) {
+    return FTP_CLIENT_PROCESS_STATUS_BAD_STATE;
+  }
+
   const char *data_info_start = strchr(context->recv_buffer, '(');
   if (!data_info_start || !strchr(data_info_start, ')')) {
     return FTP_CLIENT_PROCESS_PASV_RESPONSE_INVALID;
@@ -328,18 +342,28 @@ static FTPClientProcessStatus Handle227(FTPClient *context) {
     return FTP_CLIENT_PROCESS_PASV_RESPONSE_INVALID;
   }
 
+  send_op->data_sockaddr.sin_family = AF_INET;
+  send_op->data_sockaddr.sin_addr.s_addr = 0xFFFFFFFF;
+  send_op->data_sockaddr.sin_port = 0;
+#ifdef __APPLE__
+  send_op->data_sockaddr.sin_len = sizeof(send_op->data_sockaddr);
+#endif
+
   char server_address[32] = "";
   snprintf(server_address, sizeof(server_address), "%d.%d.%d.%d", address[0],
            address[1], address[2], address[3]);
 #ifndef FORCE_FTP_PASV_IP_TO_CONTROL_IP
-  context->data_sockaddr.sin_addr.s_addr = inet_addr(server_address);
+  send_op->data_sockaddr.sin_addr.s_addr = inet_addr(server_address);
 #else
-  context->data_sockaddr.sin_addr.s_addr =
+  send_op->data_sockaddr.sin_addr.s_addr =
       context->control_sockaddr.sin_addr.s_addr;
 #endif
-  context->data_sockaddr.sin_port = htons((port[0] * 256 + port[1]) & 0xFFFF);
+  send_op->data_sockaddr.sin_port = htons((port[0] * 256 + port[1]) & 0xFFFF);
 
-  context->state = FTP_CLIENT_STATE_FULLY_CONNECTED;
+  RESERVE_SEND(send_buffer, send_buffer_size, 7 + strlen(send_op->filename))
+  int bytes_written =
+      snprintf(send_buffer, send_buffer_size, "STOR %s\r\n", send_op->filename);
+  VALIDATE_SEND(bytes_written)
 
   return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
 }
@@ -362,7 +386,7 @@ static FTPClientProcessStatus Handle150(FTPClient *context) {
       return FTP_CLIENT_PROCESS_STATUS_CREATE_DATA_SOCKET_FAILED;
     }
 
-    if (connect(fs->socket, (struct sockaddr *)&context->data_sockaddr,
+    if (connect(fs->socket, (struct sockaddr *)&fs->data_sockaddr,
                 sizeof(struct sockaddr)) < 0 &&
         errno != EWOULDBLOCK && errno != EINPROGRESS) {
       context->last_errno = errno;
@@ -706,20 +730,15 @@ static bool SendBuffer(FTPClient *context, const char *filename,
 
   send_operation->socket = -1;
   send_operation->read_file = read_file;
+
   char *send_buffer = context->send_buffer + context->send_buffer_len;
   size_t send_buffer_available = BUFFER_SIZE - context->send_buffer_len;
-  if (send_buffer_available < 7 + strlen(filename)) {
-    FindAndFreeSendOperation(context, send_operation);
-    return false;
-  }
 
-  int bytes_written =
-      snprintf(send_buffer, send_buffer_available, "STOR %s\r\n", filename);
-  if (bytes_written <= 0) {
+  send_operation->filename = strdup(filename);
+  if (!send_operation->filename) {
     FindAndFreeSendOperation(context, send_operation);
     return false;
   }
-  context->send_buffer_len += bytes_written;
 
   if (copy_buffer) {
     void *copied_buffer = calloc(1, buffer_len);
@@ -735,11 +754,21 @@ static bool SendBuffer(FTPClient *context, const char *filename,
     send_operation->buffer_owned = false;
     send_operation->buffer = buffer;
   }
-
   send_operation->offset = 0;
   send_operation->buffer_length = buffer_len;
   send_operation->userdata = userdata;
   send_operation->on_complete = on_complete;
+
+  if (send_buffer_available < 6) {
+    FindAndFreeSendOperation(context, send_operation);
+    return false;
+  }
+  int bytes_written = snprintf(send_buffer, send_buffer_available, "PASV\r\n");
+  if (bytes_written <= 0) {
+    FindAndFreeSendOperation(context, send_operation);
+    return false;
+  }
+  context->send_buffer_len += bytes_written;
 
   return true;
 }
