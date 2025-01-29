@@ -13,6 +13,9 @@
 #define BUFFER_SIZE 1023
 #define MAX_SEND_OPERATIONS 4
 
+#define DEFAULT_CONNECT_TIMEOUT_MILLISECONDS (20 * 1000)
+#define DEFAULT_PROCESS_TIMEOUT_MILLISECONDS 100
+
 typedef enum FTPClientState {
   FTP_CLIENT_STATE_DISCONNECTED,
   FTP_CLIENT_STATE_CONNECTED_AWAIT_220,
@@ -211,6 +214,9 @@ FTPClientConnectStatus FTPClientConnect(FTPClient *context,
   FD_SET(context->control_socket, &fdset);
 
   struct timeval tv;
+  if (!timeout_milliseconds) {
+    timeout_milliseconds = DEFAULT_CONNECT_TIMEOUT_MILLISECONDS;
+  }
   tv.tv_sec = timeout_milliseconds / 1000;
   tv.tv_usec = (timeout_milliseconds % 1000) * 1000;
 
@@ -564,6 +570,9 @@ FTPClientProcessStatus FTPClientProcess(FTPClient *context,
   }
 
   struct timeval tv;
+  if (!timeout_milliseconds) {
+    timeout_milliseconds = DEFAULT_PROCESS_TIMEOUT_MILLISECONDS;
+  }
   tv.tv_sec = timeout_milliseconds / 1000;
   tv.tv_usec = (timeout_milliseconds % 1000) * 1000;
 
