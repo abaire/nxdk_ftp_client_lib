@@ -357,7 +357,7 @@ static FTPClientProcessStatus Handle150(FTPClient *context) {
       return FTP_CLIENT_PROCESS_STATUS_CREATE_DATA_SOCKET_FAILED;
     }
 
-    if (fcntl(context->control_socket, F_SETFL, O_NONBLOCK) < 0) {
+    if (fcntl(fs->socket, F_SETFL, O_NONBLOCK) < 0) {
       context->last_errno = errno;
       return FTP_CLIENT_PROCESS_STATUS_CREATE_DATA_SOCKET_FAILED;
     }
@@ -527,6 +527,16 @@ static FTPClientProcessStatus WriteDataSocket(struct SendOperation *fs,
     bytes_to_send = fs->buffer_length - fs->offset;
   }
 
+  if (!bytes_to_send) {
+    shutdown(fs->socket, O_RDWR);
+    close(fs->socket);
+    fs->socket = -1;
+    if (fs->on_complete) {
+      fs->on_complete(true, fs->userdata);
+    }
+    return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
+  }
+
   ssize_t bytes_written =
       write(fs->socket, fs->buffer + fs->offset, bytes_to_send);
   if (bytes_written < 0) {
@@ -537,7 +547,7 @@ static FTPClientProcessStatus WriteDataSocket(struct SendOperation *fs,
       fs->on_complete(false, fs->userdata);
     }
 
-    return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
+    return FTP_CLIENT_PROCESS_STATUS_DATA_SOCKET_EXCEPTION;
   }
 
   fs->offset += bytes_written;
