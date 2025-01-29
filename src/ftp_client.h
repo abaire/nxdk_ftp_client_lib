@@ -1,7 +1,10 @@
 #ifndef FTP_CLIENT_H
 #define FTP_CLIENT_H
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wignored-attributes"
 #include <lwip/inet.h>
+#pragma clang diagnostic pop
 #include <nxdk/net.h>
 #include <stdbool.h>
 #include <stdint.h>
