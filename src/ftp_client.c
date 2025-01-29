@@ -189,6 +189,10 @@ FTPClientConnectStatus FTPClientConnect(FTPClient *context,
   if (!context) {
     return FTP_CLIENT_CONNECT_STATUS_INVALID_CONTEXT;
   }
+  if (FTPClientIsFullyConnected(context)) {
+    return FTP_CLIENT_CONNECT_STATUS_SUCCESS;
+  }
+
   if (context->control_socket >= 0) {
     FTPClientClose(context);
   }
