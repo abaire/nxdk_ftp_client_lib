@@ -527,6 +527,16 @@ static FTPClientProcessStatus WriteDataSocket(struct SendOperation *fs,
     bytes_to_send = fs->buffer_length - fs->offset;
   }
 
+  if (!bytes_to_send) {
+    shutdown(fs->socket, O_RDWR);
+    close(fs->socket);
+    fs->socket = -1;
+    if (fs->on_complete) {
+      fs->on_complete(true, fs->userdata);
+    }
+    return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
+  }
+
   ssize_t bytes_written =
       write(fs->socket, fs->buffer + fs->offset, bytes_to_send);
   if (bytes_written < 0) {
