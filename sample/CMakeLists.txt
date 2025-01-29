@@ -11,7 +11,7 @@ target_link_libraries(
         ftp_client_sample
         NXDK::NXDK
         NXDK::SDL2
-        ftp_client
+        nxdk_ftp_client_lib::client
 )
 
 configure_file(configure.h.in configure.h @ONLY)
