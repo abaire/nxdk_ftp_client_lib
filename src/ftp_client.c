@@ -477,7 +477,8 @@ static FTPClientProcessStatus WriteControlSocket(FTPClient *context) {
   return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
 }
 
-static FTPClientProcessStatus PopulateSendBuffer(struct SendOperation *fs) {
+static FTPClientProcessStatus PopulateSendBuffer(struct SendOperation *fs,
+                                                 int *errno_out) {
   if (!fs->buffer) {
     fs->buffer_length = FILE_BUFFER_SIZE;
     fs->buffer = (char *)malloc(fs->buffer_length);
@@ -499,6 +500,7 @@ static FTPClientProcessStatus PopulateSendBuffer(struct SendOperation *fs) {
     fs->read_file = NULL;
 
     if (error) {
+      *errno_out = error;
       return FTP_CLIENT_PROCESS_STATUS_CREATE_DATA_FILE_READ_FAILED;
     }
   }
@@ -514,7 +516,7 @@ static FTPClientProcessStatus WriteDataSocket(struct SendOperation *fs,
 
   ssize_t bytes_to_send = fs->buffer_length - fs->offset;
   if (!bytes_to_send && fs->read_file) {
-    FTPClientProcessStatus status = PopulateSendBuffer(fs);
+    FTPClientProcessStatus status = PopulateSendBuffer(fs, errno_out);
     if (status != FTP_CLIENT_PROCESS_STATUS_SUCCESS) {
       return status;
     }
@@ -546,7 +548,7 @@ static FTPClientProcessStatus WriteDataSocket(struct SendOperation *fs,
   }
 
   if (fs->offset == fs->buffer_length && fs->read_file) {
-    FTPClientProcessStatus status = PopulateSendBuffer(fs);
+    FTPClientProcessStatus status = PopulateSendBuffer(fs, errno_out);
     if (status != FTP_CLIENT_PROCESS_STATUS_SUCCESS) {
       return status;
     }
