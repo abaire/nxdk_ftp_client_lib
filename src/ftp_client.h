@@ -88,6 +88,9 @@ bool FTPClientSendFile(FTPClient *context, const char *local_filename,
                        void (*on_complete)(bool successful, void *userdata),
                        void *userdata);
 
+//! Retrieves the `errno` value related to the most recent failure.
+int FTPClientErrno(FTPClient *context);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

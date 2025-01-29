@@ -65,6 +65,8 @@ struct FTPClient {
   //! Null terminated array of SendOperation instances describing files being
   //! stored to the server.
   struct SendOperation *file_send_buffer[MAX_SEND_OPERATIONS];
+
+  int last_errno;
 };
 
 static void FreeSendOperation(struct SendOperation *send_operation) {
@@ -190,13 +192,16 @@ FTPClientConnectStatus FTPClientConnect(FTPClient *context,
   if (context->control_socket >= 0) {
     FTPClientClose(context);
   }
+  context->last_errno = 0;
 
   context->control_socket = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (context->control_socket < 0) {
+    context->last_errno = errno;
     return FTP_CLIENT_CONNECT_STATUS_SOCKET_CREATE_FAILED;
   }
 
   if (fcntl(context->control_socket, F_SETFL, O_NONBLOCK) < 0) {
+    context->last_errno = errno;
     return FTP_CLIENT_CONNECT_STATUS_SOCKET_CREATE_FAILED;
   }
 
@@ -204,6 +209,7 @@ FTPClientConnectStatus FTPClientConnect(FTPClient *context,
               (struct sockaddr *)&context->control_sockaddr,
               sizeof(struct sockaddr)) < 0 &&
       errno != EWOULDBLOCK && errno != EINPROGRESS) {
+    context->last_errno = errno;
     close(context->control_socket);
     context->control_socket = -1;
     return FTP_CLIENT_CONNECT_STATUS_CONNECT_FAILED;
@@ -230,10 +236,11 @@ FTPClientConnectStatus FTPClientConnect(FTPClient *context,
       return FTP_CLIENT_CONNECT_STATUS_SUCCESS;
     }
 
-    errno = so_error;
+    context->last_errno = so_error;
     return FTP_CLIENT_CONNECT_STATUS_CONNECT_FAILED;
   }
 
+  context->last_errno = 0;
   return FTP_CLIENT_CONNECT_STATUS_CONNECT_TIMEOUT;
 }
 
@@ -342,16 +349,19 @@ static FTPClientProcessStatus Handle150(FTPClient *context) {
 
     fs->socket = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fs->socket < 0) {
+      context->last_errno = errno;
       return FTP_CLIENT_PROCESS_STATUS_CREATE_DATA_SOCKET_FAILED;
     }
 
     if (fcntl(context->control_socket, F_SETFL, O_NONBLOCK) < 0) {
+      context->last_errno = errno;
       return FTP_CLIENT_PROCESS_STATUS_CREATE_DATA_SOCKET_FAILED;
     }
 
     if (connect(fs->socket, (struct sockaddr *)&context->data_sockaddr,
                 sizeof(struct sockaddr)) < 0 &&
         errno != EWOULDBLOCK && errno != EINPROGRESS) {
+      context->last_errno = errno;
       close(fs->socket);
       fs->socket = -1;
       return FTP_CLIENT_PROCESS_STATUS_DATA_SOCKET_CONNECT_FAILED;
@@ -403,11 +413,13 @@ static FTPClientProcessStatus ReadControlSocket(FTPClient *context) {
                             context->recv_buffer + context->recv_buffer_len,
                             BUFFER_SIZE - context->recv_buffer_len, 0);
   if (bytes_read < 0) {
+    context->last_errno = errno;
     close(context->control_socket);
     context->control_socket = -1;
     return FTP_CLIENT_PROCESS_STATUS_READ_FAILED;
   }
   if (!bytes_read) {
+    context->last_errno = 0;
     close(context->control_socket);
     context->control_socket = -1;
     return FTP_CLIENT_PROCESS_STATUS_CLOSED;
@@ -443,11 +455,13 @@ static FTPClientProcessStatus WriteControlSocket(FTPClient *context) {
   ssize_t bytes_written = write(context->control_socket, context->send_buffer,
                                 context->send_buffer_len);
   if (bytes_written < 0) {
+    context->last_errno = errno;
     close(context->control_socket);
     context->control_socket = -1;
     return FTP_CLIENT_PROCESS_STATUS_WRITE_FAILED;
   }
   if (!bytes_written) {
+    context->last_errno = 0;
     close(context->control_socket);
     context->control_socket = -1;
     return FTP_CLIENT_PROCESS_STATUS_CLOSED;
@@ -492,7 +506,8 @@ static FTPClientProcessStatus PopulateSendBuffer(struct SendOperation *fs) {
   return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
 }
 
-static FTPClientProcessStatus WriteDataSocket(struct SendOperation *fs) {
+static FTPClientProcessStatus WriteDataSocket(struct SendOperation *fs,
+                                              int *errno_out) {
   if (!fs || fs->socket < 0) {
     return FTP_CLIENT_PROCESS_STATUS_CLOSED;
   }
@@ -509,6 +524,7 @@ static FTPClientProcessStatus WriteDataSocket(struct SendOperation *fs) {
   ssize_t bytes_written =
       write(fs->socket, fs->buffer + fs->offset, bytes_to_send);
   if (bytes_written < 0) {
+    *errno_out = errno;
     close(fs->socket);
     fs->socket = -1;
     if (fs->on_complete) {
@@ -580,6 +596,7 @@ FTPClientProcessStatus FTPClientProcess(FTPClient *context,
       select(max_fd + 1, &read_fds, &write_fds, NULL, &tv);
 
   if (select_response < 0) {
+    context->last_errno = errno;
     return FTP_CLIENT_PROCESS_STATUS_SELECT_FAILED;
   }
   if (!select_response) {
@@ -608,7 +625,7 @@ FTPClientProcessStatus FTPClientProcess(FTPClient *context,
     }
 
     if (FD_ISSET(fs->socket, &write_fds)) {
-      FTPClientProcessStatus result = WriteDataSocket(fs);
+      FTPClientProcessStatus result = WriteDataSocket(fs, &context->last_errno);
       if (result != FTP_CLIENT_PROCESS_STATUS_SUCCESS) {
         return result;
       }
@@ -751,4 +768,12 @@ bool FTPClientSendFile(FTPClient *context, const char *local_filename,
 #ifdef __APPLE__
 #undef O_BINARY
 #endif
+}
+
+int FTPClientErrno(FTPClient *context) {
+  if (!context) {
+    return -1;
+  }
+
+  return context->last_errno;
 }
