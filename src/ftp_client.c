@@ -9,6 +9,7 @@
 #include "configure.h"
 #include "lwip/errno.h"
 
+#define FILE_BUFFER_SIZE 4096
 #define BUFFER_SIZE 1023
 #define MAX_SEND_OPERATIONS 4
 
@@ -23,17 +24,22 @@ typedef enum FTPClientState {
   FTP_CLIENT_STATE_FULLY_CONNECTED,
 } FTPClientState;
 
-struct FileSend {
+//! Encapsulates information about a passive STOR operation.
+struct SendOperation {
   int socket;
+
   const void *buffer;
-  size_t buffer_length;
-  size_t offset;
+  ssize_t buffer_length;
+  ssize_t offset;
   bool buffer_owned;
 
-  void *userdata;
+  //! Optional file descriptor from which `buffer` should be populated.
+  FILE *read_file;
 
-  //! Callback to be invoked when the send is completed.
+  //! Callback to be invoked when the operation is completed.
   void (*on_complete)(bool successful, void *userdata);
+  //! Data to be passed to the on_complete callback.
+  void *userdata;
 };
 
 struct FTPClient {
@@ -53,12 +59,12 @@ struct FTPClient {
   char send_buffer[BUFFER_SIZE + 1];
   size_t send_buffer_len;
 
-  //! Null terminated array of FileSend instances describing files being stored
-  //! to the server.
-  struct FileSend *file_send_buffer[MAX_SEND_OPERATIONS];
+  //! Null terminated array of SendOperation instances describing files being
+  //! stored to the server.
+  struct SendOperation *file_send_buffer[MAX_SEND_OPERATIONS];
 };
 
-static void FreeFileSend(struct FileSend *send_operation) {
+static void FreeSendOperation(struct SendOperation *send_operation) {
   if (!send_operation) {
     return;
   }
@@ -68,14 +74,19 @@ static void FreeFileSend(struct FileSend *send_operation) {
     send_operation->socket = -1;
   }
 
+  if (send_operation->read_file) {
+    fclose(send_operation->read_file);
+    send_operation->read_file = NULL;
+  }
+
   if (send_operation->buffer_owned) {
     free((void *)send_operation->buffer);
   }
   free(send_operation);
 }
 
-static void FindAndFreeFileSend(FTPClient *context,
-                                struct FileSend *send_operation) {
+static void FindAndFreeSendOperation(FTPClient *context,
+                                     struct SendOperation *send_operation) {
   for (size_t i = 0; i < MAX_SEND_OPERATIONS; ++i) {
     if (context->file_send_buffer[i] == send_operation) {
       context->file_send_buffer[i] = NULL;
@@ -83,7 +94,7 @@ static void FindAndFreeFileSend(FTPClient *context,
     }
   }
 
-  FreeFileSend(send_operation);
+  FreeSendOperation(send_operation);
 }
 
 FTPClientInitStatus FTPClientInit(FTPClient **context,
@@ -153,7 +164,7 @@ void FTPClientDestroy(FTPClient **context) {
   }
 
   for (size_t i = 0; i < MAX_SEND_OPERATIONS; ++i) {
-    FreeFileSend((*context)->file_send_buffer[i]);
+    FreeSendOperation((*context)->file_send_buffer[i]);
     (*context)->file_send_buffer[i] = NULL;
   }
 
@@ -318,7 +329,7 @@ static FTPClientProcessStatus Handle227(FTPClient *context) {
 
 static FTPClientProcessStatus Handle150(FTPClient *context) {
   for (size_t i = 0; i < MAX_SEND_OPERATIONS; ++i) {
-    struct FileSend *fs = context->file_send_buffer[i];
+    struct SendOperation *fs = context->file_send_buffer[i];
     if (!fs || fs->socket >= 0) {
       continue;
     }
@@ -446,12 +457,49 @@ static FTPClientProcessStatus WriteControlSocket(FTPClient *context) {
   return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
 }
 
-static FTPClientProcessStatus WriteDataSocket(struct FileSend *fs) {
+static FTPClientProcessStatus PopulateSendBuffer(struct SendOperation *fs) {
+  if (!fs->buffer) {
+    fs->buffer_length = FILE_BUFFER_SIZE;
+    fs->buffer = (char *)malloc(fs->buffer_length);
+    fs->buffer_owned = true;
+
+    if (!fs->buffer) {
+      return FTP_CLIENT_PROCESS_STATUS_CREATE_DATA_BUFFER_FAILED;
+    }
+  }
+
+  size_t bytes_read =
+      fread((void *)fs->buffer, 1, FILE_BUFFER_SIZE, fs->read_file);
+  fs->offset = 0;
+  fs->buffer_length = (ssize_t)bytes_read;
+
+  if (!bytes_read) {
+    int error = ferror(fs->read_file);
+    fclose(fs->read_file);
+    fs->read_file = NULL;
+
+    if (error) {
+      return FTP_CLIENT_PROCESS_STATUS_CREATE_DATA_FILE_READ_FAILED;
+    }
+  }
+
+  return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
+}
+
+static FTPClientProcessStatus WriteDataSocket(struct SendOperation *fs) {
   if (!fs || fs->socket < 0) {
     return FTP_CLIENT_PROCESS_STATUS_CLOSED;
   }
 
   ssize_t bytes_to_send = fs->buffer_length - fs->offset;
+  if (!bytes_to_send && fs->read_file) {
+    FTPClientProcessStatus status = PopulateSendBuffer(fs);
+    if (status != FTP_CLIENT_PROCESS_STATUS_SUCCESS) {
+      return status;
+    }
+    bytes_to_send = fs->buffer_length - fs->offset;
+  }
+
   ssize_t bytes_written =
       write(fs->socket, fs->buffer + fs->offset, bytes_to_send);
   if (bytes_written < 0) {
@@ -464,19 +512,21 @@ static FTPClientProcessStatus WriteDataSocket(struct FileSend *fs) {
     return FTP_CLIENT_PROCESS_STATUS_SUCCESS;
   }
 
+  fs->offset += bytes_written;
+
   if (!bytes_written) {
+    shutdown(fs->socket, O_RDWR);
     close(fs->socket);
     fs->socket = -1;
     if (fs->on_complete) {
-      fs->on_complete(false, fs->userdata);
+      fs->on_complete(true, fs->userdata);
     }
   }
 
-  fs->offset += bytes_written;
-  if (fs->offset == fs->buffer_length) {
-    shutdown(fs->socket, O_RDWR);
-    if (fs->on_complete) {
-      fs->on_complete(true, fs->userdata);
+  if (fs->offset == fs->buffer_length && fs->read_file) {
+    FTPClientProcessStatus status = PopulateSendBuffer(fs);
+    if (status != FTP_CLIENT_PROCESS_STATUS_SUCCESS) {
+      return status;
     }
   }
 
@@ -501,7 +551,7 @@ FTPClientProcessStatus FTPClientProcess(FTPClient *context,
     FD_SET(context->control_socket, &write_fds);
   }
   for (size_t i = 0; i < MAX_SEND_OPERATIONS; ++i) {
-    struct FileSend *fs = context->file_send_buffer[i];
+    struct SendOperation *fs = context->file_send_buffer[i];
     if (!fs || fs->socket < 0) {
       continue;
     }
@@ -543,7 +593,7 @@ FTPClientProcessStatus FTPClientProcess(FTPClient *context,
   }
 
   for (size_t i = 0; i < MAX_SEND_OPERATIONS; ++i) {
-    struct FileSend *fs = context->file_send_buffer[i];
+    struct SendOperation *fs = context->file_send_buffer[i];
     if (!fs || fs->socket < 0) {
       continue;
     }
@@ -554,7 +604,7 @@ FTPClientProcessStatus FTPClientProcess(FTPClient *context,
         return result;
       }
       if (fs->offset >= fs->buffer_length) {
-        FindAndFreeFileSend(context, fs);
+        FindAndFreeSendOperation(context, fs);
       }
     }
   }
@@ -584,18 +634,25 @@ bool FTPClientProcessStatusIsError(FTPClientProcessStatus status) {
 }
 
 static bool SendBuffer(FTPClient *context, const char *filename,
-                       const void *buffer, size_t buffer_len,
+                       const void *buffer, size_t buffer_len, FILE *read_file,
                        void (*on_complete)(bool successful, void *userdata),
                        void *userdata, bool copy_buffer) {
-  if (!FTPClientIsFullyConnected(context) || !filename || !buffer ||
-      !buffer_len) {
+  if (!FTPClientIsFullyConnected(context) || !filename) {
     return false;
   }
 
-  struct FileSend *send_operation = NULL;
+  if (!read_file && (!buffer || !buffer_len)) {
+    return false;
+  }
+
+  struct SendOperation *send_operation = NULL;
   for (size_t i = 0; i < MAX_SEND_OPERATIONS; ++i) {
     if (!context->file_send_buffer[i]) {
-      send_operation = (struct FileSend *)calloc(1, sizeof(*send_operation));
+      send_operation =
+          (struct SendOperation *)calloc(1, sizeof(*send_operation));
+      if (!send_operation) {
+        return false;
+      }
       context->file_send_buffer[i] = send_operation;
       break;
     }
@@ -606,17 +663,18 @@ static bool SendBuffer(FTPClient *context, const char *filename,
   }
 
   send_operation->socket = -1;
+  send_operation->read_file = read_file;
   char *send_buffer = context->send_buffer + context->send_buffer_len;
   size_t send_buffer_available = BUFFER_SIZE - context->send_buffer_len;
   if (send_buffer_available < 7 + strlen(filename)) {
-    FindAndFreeFileSend(context, send_operation);
+    FindAndFreeSendOperation(context, send_operation);
     return false;
   }
 
   int bytes_written =
       snprintf(send_buffer, send_buffer_available, "STOR %s\r\n", filename);
   if (bytes_written <= 0) {
-    FindAndFreeFileSend(context, send_operation);
+    FindAndFreeSendOperation(context, send_operation);
     return false;
   }
   context->send_buffer_len += bytes_written;
@@ -624,7 +682,7 @@ static bool SendBuffer(FTPClient *context, const char *filename,
   if (copy_buffer) {
     void *copied_buffer = calloc(1, buffer_len);
     if (!copied_buffer) {
-      FindAndFreeFileSend(context, send_operation);
+      FindAndFreeSendOperation(context, send_operation);
       return false;
     }
     memcpy(copied_buffer, buffer, buffer_len);
@@ -649,7 +707,7 @@ bool FTPClientCopyAndSendBuffer(FTPClient *context, const char *filename,
                                 void (*on_complete)(bool successful,
                                                     void *userdata),
                                 void *userdata) {
-  return SendBuffer(context, filename, buffer, buffer_len, on_complete,
+  return SendBuffer(context, filename, buffer, buffer_len, NULL, on_complete,
                     userdata, true);
 }
 
@@ -657,6 +715,31 @@ bool FTPClientSendBuffer(FTPClient *context, const char *filename,
                          const void *buffer, size_t buffer_len,
                          void (*on_complete)(bool successful, void *userdata),
                          void *userdata) {
-  return SendBuffer(context, filename, buffer, buffer_len, on_complete,
+  return SendBuffer(context, filename, buffer, buffer_len, NULL, on_complete,
                     userdata, false);
+}
+
+bool FTPClientSendFile(FTPClient *context, const char *local_filename,
+                       const char *remote_filename,
+                       void (*on_complete)(bool successful, void *userdata),
+                       void *userdata) {
+  if (!local_filename) {
+    return false;
+  }
+
+#if !defined(WIN32) && !defined(O_BINARY)
+#define O_BINARY 0
+#endif
+
+  FILE *read_file = fopen(local_filename, "rb");
+  if (!read_file) {
+    return false;
+  }
+
+  return SendBuffer(context, remote_filename ? remote_filename : local_filename,
+                    NULL, 0, read_file, on_complete, userdata, false);
+
+#ifdef __APPLE__
+#undef O_BINARY
+#endif
 }

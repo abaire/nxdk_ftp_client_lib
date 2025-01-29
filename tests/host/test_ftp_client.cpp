@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <csignal>
+#include <fstream>
 #include <future>
 #include <thread>
 
@@ -336,6 +337,10 @@ static FTPClientProcessStatus ProcessLoop(FTPClient *context,
   return status;
 }
 
+static void SendCompletedCallback(bool successful, void *userdata) {
+  *reinterpret_cast<bool *>(userdata) = successful;
+}
+
 TEST_F(FTPServerFixture, ftp_client_connect__connects) {
   FTPClient *context;
   FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port, nullptr,
@@ -425,10 +430,6 @@ TEST_F(FTPServerFixture, ftp_client_copy_and_send_buffer) {
   FTPClientDestroy(&context);
 }
 
-static void SendCompletedCallback(bool successful, void *userdata) {
-  *reinterpret_cast<bool *>(userdata) = successful;
-}
-
 TEST_F(FTPServerFixture, ftp_client_send_buffer__calls_callback) {
   FTPClient *context;
   FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
@@ -474,6 +475,142 @@ TEST_F(FTPServerFixture, ftp_client_copy_and_send_buffer__calls_callback) {
 
   connection_quiescent.ClearAndAwait();
   EXPECT_STREQ(received_data.c_str(), buffer);
+
+  FTPClientDestroy(&context);
+}
+
+TEST_F(FTPServerFixture, FTPClientSendFile__with_null_file__returns_false) {
+  FTPClient *context;
+  FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
+                "username", "password");
+  ASSERT_EQ(FTPClientConnect(context, 300), FTP_CLIENT_CONNECT_STATUS_SUCCESS);
+
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  bool send_completed = false;
+  EXPECT_FALSE(FTPClientSendFile(context, nullptr, nullptr,
+                                 SendCompletedCallback, &send_completed));
+
+  FTPClientDestroy(&context);
+}
+
+TEST_F(FTPServerFixture, FTPClientSendFile__without_file__returns_false) {
+  FTPClient *context;
+  FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
+                "username", "password");
+  ASSERT_EQ(FTPClientConnect(context, 300), FTP_CLIENT_CONNECT_STATUS_SUCCESS);
+
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  bool send_completed = false;
+  EXPECT_FALSE(FTPClientSendFile(context, "__this_file_does_not_exist___",
+                                 nullptr, SendCompletedCallback,
+                                 &send_completed));
+
+  FTPClientDestroy(&context);
+}
+
+TEST_F(FTPServerFixture,
+       FTPClientSendFile__without_remote_filename__sends_local_filename) {
+  FTPClient *context;
+  FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
+                "username", "password");
+  ASSERT_EQ(FTPClientConnect(context, 300), FTP_CLIENT_CONNECT_STATUS_SUCCESS);
+
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  auto temp_filename = testing::TempDir() + "this_is_a_test_file.txt";
+  const char buffer[] = "This is the content of the buffer\r\nWith two lines.";
+  std::ofstream outfile(temp_filename);
+  outfile << buffer;
+  outfile.close();
+
+  bool send_completed = false;
+  EXPECT_TRUE(FTPClientSendFile(context, temp_filename.c_str(), nullptr,
+                                SendCompletedCallback, &send_completed));
+
+  auto result = ProcessLoop(context, 100);
+  EXPECT_FALSE(FTPClientProcessStatusIsError(result))
+      << "  " << strerror(errno);
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  connection_quiescent.ClearAndAwait();
+  EXPECT_STREQ(received_data.c_str(), buffer);
+
+  EXPECT_THAT(stor_events, ElementsAre("STOR " + temp_filename + "\r\n"));
+
+  FTPClientDestroy(&context);
+}
+
+TEST_F(FTPServerFixture,
+       FTPClientSendFile__with_remote_filename__sends_remote_filename) {
+  FTPClient *context;
+  FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
+                "username", "password");
+  ASSERT_EQ(FTPClientConnect(context, 300), FTP_CLIENT_CONNECT_STATUS_SUCCESS);
+
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  auto temp_filename = testing::TempDir() + "this_is_a_test_file.txt";
+  const char buffer[] = "This is the content of the buffer\r\nWith two lines.";
+  std::ofstream outfile(temp_filename);
+  outfile << buffer;
+  outfile.close();
+
+  bool send_completed = false;
+  EXPECT_TRUE(FTPClientSendFile(context, temp_filename.c_str(), "remoteFile",
+                                SendCompletedCallback, &send_completed));
+
+  auto result = ProcessLoop(context, 100);
+  EXPECT_FALSE(FTPClientProcessStatusIsError(result))
+      << "  " << strerror(errno);
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  connection_quiescent.ClearAndAwait();
+  EXPECT_STREQ(received_data.c_str(), buffer);
+
+  EXPECT_THAT(stor_events, ElementsAre("STOR remoteFile\r\n"));
+
+  FTPClientDestroy(&context);
+}
+
+TEST_F(FTPServerFixture,
+       FTPClientSendFile__with_very_large_file__sends_everythinge) {
+  FTPClient *context;
+  FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
+                "username", "password");
+  ASSERT_EQ(FTPClientConnect(context, 300), FTP_CLIENT_CONNECT_STATUS_SUCCESS);
+
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  auto temp_filename = testing::TempDir() + "this_is_a_test_file.txt";
+  std::string buffer;
+  {
+    std::stringstream builder;
+    for (auto i = 0; i < 112; ++i) {
+      builder << "abcdefghijklmnopqrstuvwxyz1234567890\n";
+    }
+
+    buffer = builder.str();
+  }
+
+  std::ofstream outfile(temp_filename);
+  outfile << buffer;
+  outfile.close();
+
+  bool send_completed = false;
+  EXPECT_TRUE(FTPClientSendFile(context, temp_filename.c_str(), "remoteFile",
+                                SendCompletedCallback, &send_completed));
+
+  auto result = ProcessLoop(context, 100);
+  EXPECT_FALSE(FTPClientProcessStatusIsError(result))
+      << "  " << strerror(errno);
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  connection_quiescent.ClearAndAwait();
+  EXPECT_EQ(received_data, buffer);
+
+  EXPECT_THAT(stor_events, ElementsAre("STOR remoteFile\r\n"));
 
   FTPClientDestroy(&context);
 }
