@@ -90,6 +90,22 @@ bool FTPClientSendFile(FTPClient *context, const char *local_filename,
                        void (*on_complete)(bool successful, void *userdata),
                        void *userdata);
 
+bool FTPClientAppendBuffer(FTPClient *context, const char *filename,
+                           const void *buffer, size_t buffer_len,
+                           void (*on_complete)(bool successful, void *userdata),
+                           void *userdata);
+
+bool FTPClientCopyAndAppendBuffer(FTPClient *context, const char *filename,
+                                  const void *buffer, size_t buffer_len,
+                                  void (*on_complete)(bool successful,
+                                                      void *userdata),
+                                  void *userdata);
+
+bool FTPClientAppendFile(FTPClient *context, const char *local_filename,
+                         const char *remote_filename,
+                         void (*on_complete)(bool successful, void *userdata),
+                         void *userdata);
+
 //! Retrieves the `errno` value related to the most recent failure.
 int FTPClientErrno(FTPClient *context);
 

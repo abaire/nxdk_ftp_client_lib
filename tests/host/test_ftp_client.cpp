@@ -95,6 +95,7 @@ class FTPServerFixture : public ::testing::Test {
   std::vector<std::string> user_events;
   std::vector<std::string> pass_events;
   std::vector<std::string> stor_events;
+  std::vector<std::string> appe_events;
   std::vector<std::string> type_events;
 
   void SetUp() override {
@@ -234,6 +235,9 @@ class FTPServerFixture : public ::testing::Test {
       } else if (command.find("STOR") != std::string::npos) {
         stor_events.emplace_back(command);
         OnStore(client_socket);
+      } else if (command.find("APPE") != std::string::npos) {
+        appe_events.emplace_back(command);
+        OnAppend(client_socket);
       } else if (command.find("QUIT") != std::string::npos) {
         SendAll(client_socket, "221 Goodbye.\r\n", 14);
         break;
@@ -280,6 +284,8 @@ class FTPServerFixture : public ::testing::Test {
   void OnStore(int client_socket) {
     SendAll(client_socket, "150 Go ahead.\r\n", 15);
 
+    received_data.clear();
+
     socklen_t client_addr_len = sizeof(client_addr);
     int data_client_socket =
         accept(data_socket, reinterpret_cast<struct sockaddr *>(&client_addr),
@@ -294,6 +300,30 @@ class FTPServerFixture : public ::testing::Test {
     }
 
     close(data_client_socket);
+    close(data_socket);
+    data_socket = -1;
+    SendAll(client_socket, "226 Transfer complete.\r\n", 24);
+  }
+
+  void OnAppend(int client_socket) {
+    SendAll(client_socket, "150 Go ahead.\r\n", 15);
+
+    socklen_t client_addr_len = sizeof(client_addr);
+    int data_client_socket =
+        accept(data_socket, reinterpret_cast<struct sockaddr *>(&client_addr),
+               &client_addr_len);
+    ASSERT_NE(data_client_socket, -1) << "Failed to accept data connection";
+
+    char data_buffer[1024];
+    ssize_t bytes_received;
+    while ((bytes_received = recv(data_client_socket, data_buffer,
+                                  sizeof(data_buffer), 0)) > 0) {
+      received_data.append(data_buffer, bytes_received);
+    }
+
+    close(data_client_socket);
+    close(data_socket);
+    data_socket = -1;
     SendAll(client_socket, "226 Transfer complete.\r\n", 24);
   }
 
@@ -407,7 +437,7 @@ TEST_F(FTPServerFixture, ftp_client_send_buffer) {
   FTPClientDestroy(&context);
 }
 
-TEST_F(FTPServerFixture, ftp_client_copy_and_send_buffer) {
+TEST_F(FTPServerFixture, TestFTPClientCopyAndSendBuffer) {
   FTPClient *context;
   FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
                 "username", "password");
@@ -430,7 +460,7 @@ TEST_F(FTPServerFixture, ftp_client_copy_and_send_buffer) {
   FTPClientDestroy(&context);
 }
 
-TEST_F(FTPServerFixture, ftp_client_send_buffer__calls_callback) {
+TEST_F(FTPServerFixture, TestFTPClientSendBuffer__calls_callback) {
   FTPClient *context;
   FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
                 "username", "password");
@@ -454,7 +484,7 @@ TEST_F(FTPServerFixture, ftp_client_send_buffer__calls_callback) {
   FTPClientDestroy(&context);
 }
 
-TEST_F(FTPServerFixture, ftp_client_copy_and_send_buffer__calls_callback) {
+TEST_F(FTPServerFixture, TestFTPClientCopyAndSendBuffer__calls_callback) {
   FTPClient *context;
   FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
                 "username", "password");
@@ -479,7 +509,7 @@ TEST_F(FTPServerFixture, ftp_client_copy_and_send_buffer__calls_callback) {
   FTPClientDestroy(&context);
 }
 
-TEST_F(FTPServerFixture, FTPClientSendFile__with_null_file__returns_false) {
+TEST_F(FTPServerFixture, TestFTPClientSendFile__with_null_file__returns_false) {
   FTPClient *context;
   FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
                 "username", "password");
@@ -494,7 +524,7 @@ TEST_F(FTPServerFixture, FTPClientSendFile__with_null_file__returns_false) {
   FTPClientDestroy(&context);
 }
 
-TEST_F(FTPServerFixture, FTPClientSendFile__without_file__returns_false) {
+TEST_F(FTPServerFixture, TestFTPClientSendFile__without_file__returns_false) {
   FTPClient *context;
   FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
                 "username", "password");
@@ -511,7 +541,7 @@ TEST_F(FTPServerFixture, FTPClientSendFile__without_file__returns_false) {
 }
 
 TEST_F(FTPServerFixture,
-       FTPClientSendFile__without_remote_filename__sends_local_filename) {
+       TestFTPClientSendFile__without_remote_filename__sends_local_filename) {
   FTPClient *context;
   FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
                 "username", "password");
@@ -543,7 +573,7 @@ TEST_F(FTPServerFixture,
 }
 
 TEST_F(FTPServerFixture,
-       FTPClientSendFile__with_remote_filename__sends_remote_filename) {
+       TestFTPClientSendFile__with_remote_filename__sends_remote_filename) {
   FTPClient *context;
   FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
                 "username", "password");
@@ -575,7 +605,7 @@ TEST_F(FTPServerFixture,
 }
 
 TEST_F(FTPServerFixture,
-       FTPClientSendFile__with_very_large_file__sends_everythinge) {
+       TestFTPClientSendFile__with_very_large_file__sends_everythinge) {
   FTPClient *context;
   FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
                 "username", "password");
@@ -611,6 +641,107 @@ TEST_F(FTPServerFixture,
   EXPECT_EQ(received_data, buffer);
 
   EXPECT_THAT(stor_events, ElementsAre("STOR remoteFile\r\n"));
+
+  FTPClientDestroy(&context);
+}
+
+TEST_F(FTPServerFixture, TestFTPClientAppendBuffer) {
+  FTPClient *context;
+  FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
+                "username", "password");
+  ASSERT_EQ(FTPClientConnect(context, 300), FTP_CLIENT_CONNECT_STATUS_SUCCESS);
+
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  std::string buffer = "This is the content of the buffer\r\n";
+  EXPECT_TRUE(FTPClientSendBuffer(context, "test.txt", buffer.c_str(),
+                                  buffer.length(), nullptr, nullptr));
+
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)))
+      << "  " << strerror(errno);
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  connection_quiescent.ClearAndAwait();
+
+  std::string buffer_append = "With two lines.";
+
+  EXPECT_TRUE(FTPClientAppendBuffer(context, "test.txt", buffer_append.c_str(),
+                                    buffer_append.size(), nullptr, nullptr));
+
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)))
+      << "  " << strerror(errno);
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  connection_quiescent.ClearAndAwait();
+
+  EXPECT_EQ(received_data, buffer + buffer_append);
+  EXPECT_THAT(appe_events, ElementsAre("APPE test.txt\r\n"));
+
+  FTPClientDestroy(&context);
+}
+
+TEST_F(FTPServerFixture, TestFTPClientCopyAndAppendBuffer) {
+  FTPClient *context;
+  FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
+                "username", "password");
+  ASSERT_EQ(FTPClientConnect(context, 300), FTP_CLIENT_CONNECT_STATUS_SUCCESS);
+
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  std::string buffer = "This is the content of the buffer\r\n";
+  EXPECT_TRUE(FTPClientCopyAndSendBuffer(context, "test.txt", buffer.c_str(),
+                                         buffer.size(), nullptr, nullptr));
+
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)))
+      << "  " << strerror(errno);
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  connection_quiescent.ClearAndAwait();
+
+  std::string buffer_append = "With two lines.";
+  EXPECT_TRUE(
+      FTPClientCopyAndAppendBuffer(context, "test.txt", buffer_append.c_str(),
+                                   buffer_append.size(), nullptr, nullptr));
+
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)))
+      << "  " << strerror(errno);
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  connection_quiescent.ClearAndAwait();
+
+  EXPECT_EQ(received_data, buffer + buffer_append);
+  EXPECT_THAT(appe_events, ElementsAre("APPE test.txt\r\n"));
+
+  FTPClientDestroy(&context);
+}
+
+TEST_F(FTPServerFixture, TestFTPClientAppendFile) {
+  FTPClient *context;
+  FTPClientInit(&context, ntohl(inet_addr("127.0.0.1")), control_port,
+                "username", "password");
+  ASSERT_EQ(FTPClientConnect(context, 300), FTP_CLIENT_CONNECT_STATUS_SUCCESS);
+
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  auto temp_filename = testing::TempDir() + "this_is_a_test_file.txt";
+  const char buffer[] = "This is the content of the buffer\r\nWith two lines.";
+  std::ofstream outfile(temp_filename);
+  outfile << buffer;
+  outfile.close();
+
+  bool send_completed = false;
+  EXPECT_TRUE(FTPClientAppendFile(context, temp_filename.c_str(), nullptr,
+                                  SendCompletedCallback, &send_completed));
+
+  auto result = ProcessLoop(context, 100);
+  EXPECT_FALSE(FTPClientProcessStatusIsError(result))
+      << "  " << strerror(errno);
+  EXPECT_FALSE(FTPClientProcessStatusIsError(ProcessLoop(context, 100)));
+
+  connection_quiescent.ClearAndAwait();
+  EXPECT_STREQ(received_data.c_str(), buffer);
+
+  EXPECT_THAT(appe_events, ElementsAre("APPE " + temp_filename + "\r\n"));
 
   FTPClientDestroy(&context);
 }
